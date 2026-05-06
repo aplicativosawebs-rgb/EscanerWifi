@@ -13,8 +13,11 @@ import os
 #  LIBRERÍAS REQUERIDAS
 # -------------------------------------------------------
 DEPENDENCIAS = [
-    
+
+    # --- UI ---
     "PyQt6",
+
+    # --- Red y escaneo ---
     "scapy",
     "requests",
     "psutil",
@@ -25,22 +28,33 @@ DEPENDENCIAS = [
     "certifi",
     "chardet",
     "idna",
+    "python-nmap",
+    "netifaces",
+    "speedtest-cli",
+
+    # --- Utilidades generales ---
     "colorama",
     "setuptools",
     "wheel",
     "future",
-    "speedtest-cli",
-    "qt-material",
     "python-dotenv",
-    "python-nmap",
-    "netifaces",
+    "qt-material",
+
+    # --- IA / Machine Learning ---
     "scikit-learn",
-    "pandas",
-    "matplotlib",
     "numpy",
-    "scikit-learn numpy",
-    "pdfplumber", "PyMuPDF", "reportlab", "fpdf", "weasyprint", 
-    "pypdf", "PyPDF2", "python-docx"
+    "pandas",          # usado para lectura y procesamiento de datasets CSV
+    "matplotlib",
+
+    # --- PDF / Documentos ---
+    "pdfplumber",
+    "PyMuPDF",         # fitz — backend alternativo para PDF
+    "reportlab",
+    "fpdf",
+    "weasyprint",
+    "pypdf",
+    "PyPDF2",
+    "python-docx",
 ]
 
 LINUX_TOOLS = [

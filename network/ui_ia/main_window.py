@@ -199,7 +199,9 @@ class ScanPortsWorker(QObject):
 
 class DocumentLoaderWorker(QObject):
     """Worker para cargar documentos en hilo separado sin bloquear la UI."""
-    finished = pyqtSignal(bool, str, str)   # success, message, filename
+    finished        = pyqtSignal(bool, str, str)          # success, message, filename
+    dataset_info    = pyqtSignal(str, int, int)            # filename, rows, cols  (solo CSV)
+    progress_update = pyqtSignal(str)                      # mensaje de progreso intermedio
 
     def __init__(self, doc_trainer, filepath: str):
         super().__init__()
@@ -209,8 +211,30 @@ class DocumentLoaderWorker(QObject):
     def run(self):
         import os
         fname = os.path.basename(self.filepath)
+        ext   = os.path.splitext(fname)[1].lower()
+
         try:
+            # Notificar si es un dataset CSV (puede tardar)
+            if ext == ".csv":
+                self.progress_update.emit(
+                    f"Leyendo dataset CSV: {fname} — esto puede tardar según el tamaño..."
+                    if True else f"Reading CSV dataset: {fname} — this may take a while..."
+                )
+
             success, message = self.doc_trainer.add_document(self.filepath)
+
+            # Si fue un CSV exitoso, emitir señal extra con metadatos
+            if success and ext == ".csv":
+                docs = self.doc_trainer.list_documents()
+                for d in docs:
+                    if d["filename"] == fname and d.get("is_dataset"):
+                        self.dataset_info.emit(
+                            fname,
+                            d.get("dataset_rows", 0) if isinstance(d.get("dataset_rows"), int) else 0,
+                            d.get("dataset_cols", 0) if isinstance(d.get("dataset_cols"), int) else 0,
+                        )
+                        break
+
             self.finished.emit(success, message, fname)
         except Exception as e:
             self.finished.emit(False, str(e), fname)
@@ -679,14 +703,14 @@ class MainWindow(QMainWindow):
 
         # Explicacion
         info = QLabel(self._txt(
-            "Sube documentos PDF, TXT o DOCX sobre redes y seguridad informatica. "
+            "Sube documentos PDF, TXT, DOCX o datasets CSV sobre redes y seguridad informatica. "
             "La IA aprende de ellos y podra responder preguntas usando ese conocimiento. "
-            "El entrenamiento se guarda automaticamente y persiste entre sesiones.\n"
-            "IMPORTANTE: Solo se aceptan documentos relacionados con redes, seguridad o ciberseguridad.",
-            "Upload PDF, TXT or DOCX documents about networks and computer security. "
+            "Los datasets CSV se procesan fila a fila sin importar su tamaño ni cantidad de columnas. "
+            "El entrenamiento se guarda automaticamente y persiste entre sesiones.",
+            "Upload PDF, TXT, DOCX documents or CSV datasets about networks and computer security. "
             "The AI learns from them and can answer questions using that knowledge. "
-            "Training is automatically saved and persists between sessions.\n"
-            "IMPORTANT: Only documents related to networks, security or cybersecurity are accepted."
+            "CSV datasets are processed row by row regardless of size or number of columns. "
+            "Training is automatically saved and persists between sessions."
         ))
         info.setWordWrap(True)
         info.setStyleSheet(
@@ -700,8 +724,8 @@ class MainWindow(QMainWindow):
         action_row.setSpacing(8)
 
         self.btn_upload_doc = QPushButton(self._txt(
-            "SUBIR DOCUMENTO (PDF / TXT / DOCX)",
-            "UPLOAD DOCUMENT (PDF / TXT / DOCX)"
+            "SUBIR DOCUMENTO / DATASET (PDF · TXT · DOCX · CSV)",
+            "UPLOAD DOCUMENT / DATASET (PDF · TXT · DOCX · CSV)"
         ))
         self.btn_upload_doc.setObjectName("btn_upload")
         self.btn_upload_doc.clicked.connect(self._upload_document)
@@ -1338,26 +1362,46 @@ class MainWindow(QMainWindow):
     # ==========================================================
 
     def _upload_document(self):
-        filters = "Documentos (*.pdf *.txt *.docx *.md *.csv);;PDF (*.pdf);;Texto (*.txt);;Word (*.docx);;Todos (*.*)"
+        filters = (
+            "Todos los soportados (*.pdf *.txt *.docx *.md *.csv *.log *.yaml *.yml *.json);;"
+            "Dataset CSV (*.csv);;"
+            "PDF (*.pdf);;"
+            "Texto (*.txt *.md *.log *.yaml *.yml *.json);;"
+            "Word (*.docx);;"
+            "Todos (*.*)"
+        )
         filepath, _ = QFileDialog.getOpenFileName(
             self,
-            self._txt("Seleccionar documento para entrenar la IA",
-                      "Select document to train the AI"),
+            self._txt("Seleccionar documento o dataset para entrenar la IA",
+                      "Select document or dataset to train the AI"),
             "",
             filters
         )
         if not filepath:
             return
 
+        import os
         fname = os.path.basename(filepath)
-        self._doc_log(self._txt(
-            f"Cargando: {fname}  (procesando en segundo plano...)",
-            f"Loading: {fname}  (processing in background...)"
-        ), "#58a6ff")
+        ext   = os.path.splitext(fname)[1].lower()
+        is_dataset = ext == ".csv"
+
+        if is_dataset:
+            self._doc_log(self._txt(
+                f"Dataset detectado: {fname}  — procesando todas las filas y columnas en segundo plano...",
+                f"Dataset detected: {fname}  — processing all rows and columns in background..."
+            ), "#a371f7")
+        else:
+            self._doc_log(self._txt(
+                f"Cargando: {fname}  (procesando en segundo plano...)",
+                f"Loading: {fname}  (processing in background...)"
+            ), "#58a6ff")
 
         # Deshabilitar boton mientras carga
         self.btn_upload_doc.setEnabled(False)
-        self.btn_upload_doc.setText(self._txt("Cargando...", "Loading..."))
+        self.btn_upload_doc.setText(
+            self._txt("Procesando dataset..." if is_dataset else "Cargando...",
+                      "Processing dataset..." if is_dataset else "Loading...")
+        )
 
         # Crear worker + hilo para no bloquear la UI
         self._doc_thread = QThread()
@@ -1366,27 +1410,52 @@ class MainWindow(QMainWindow):
 
         self._doc_thread.started.connect(self._doc_worker.run)
         self._doc_worker.finished.connect(self._on_document_loaded)
+        self._doc_worker.progress_update.connect(
+            lambda msg: self._doc_log(f"  {msg}", "#58a6ff")
+        )
+        self._doc_worker.dataset_info.connect(self._on_dataset_info)
         self._doc_worker.finished.connect(self._doc_thread.quit)
         self._doc_worker.finished.connect(self._doc_worker.deleteLater)
         self._doc_thread.finished.connect(self._doc_thread.deleteLater)
 
         self._doc_thread.start()
 
+    def _on_dataset_info(self, fname: str, rows: int, cols: int):
+        """Callback cuando se termina de procesar un dataset CSV — muestra estadísticas."""
+        self._doc_log(self._txt(
+            f"  Dataset '{fname}': {rows:,} filas × {cols} columnas indexadas en la IA.",
+            f"  Dataset '{fname}': {rows:,} rows × {cols} columns indexed in AI."
+        ), "#a371f7")
+        self._chat_sys(self._txt(
+            f"Dataset de red/seguridad cargado: '{fname}' ({rows:,} filas × {cols} columnas).\n"
+            "Ahora puedo responder preguntas usando los datos de ese dataset.",
+            f"Network/security dataset loaded: '{fname}' ({rows:,} rows × {cols} columns).\n"
+            "I can now answer questions using data from that dataset."
+        ))
+
     def _on_document_loaded(self, success: bool, message: str, fname: str):
         """Callback cuando el hilo de carga termina. Siempre corre en el hilo de UI."""
-        # Re-habilitar boton
+        ext        = os.path.splitext(fname)[1].lower()
+        is_dataset = ext == ".csv"
+
+        # Re-habilitar boton con texto correcto
         self.btn_upload_doc.setEnabled(True)
-        self.btn_upload_doc.setText(self._txt("+ Subir documento", "+ Upload document"))
+        self.btn_upload_doc.setText(self._txt(
+            "SUBIR DOCUMENTO / DATASET (PDF · TXT · DOCX · CSV)",
+            "UPLOAD DOCUMENT / DATASET (PDF · TXT · DOCX · CSV)"
+        ))
 
         if success:
             self._doc_log(f"OK: {message}", "#3fb950")
             self._refresh_doc_table()
-            self._chat_sys(self._txt(
-                f"Nuevo documento agregado a mi conocimiento: {fname}\n"
-                "Ahora puedo responder preguntas usando la informacion de ese documento.",
-                f"New document added to my knowledge: {fname}\n"
-                "I can now answer questions using the information from that document."
-            ))
+            if not is_dataset:
+                # El chat para datasets ya se maneja en _on_dataset_info
+                self._chat_sys(self._txt(
+                    f"Nuevo documento agregado a mi conocimiento: {fname}\n"
+                    "Ahora puedo responder preguntas usando la informacion de ese documento.",
+                    f"New document added to my knowledge: {fname}\n"
+                    "I can now answer questions using the information from that document."
+                ))
         else:
             self._doc_log(self._txt(
                 f"ERROR al cargar '{fname}': {message}",
@@ -1420,7 +1489,14 @@ class MainWindow(QMainWindow):
             self.doc_table.setItem(row, 0, QTableWidgetItem(doc["filename"]))
             self.doc_table.setItem(row, 1, QTableWidgetItem(doc["date"]))
             self.doc_table.setItem(row, 2, QTableWidgetItem(f"{doc['chars']:,} chars"))
-            self.doc_table.setItem(row, 3, QTableWidgetItem(f"{doc['score']*100:.1f}%"))
+            if doc.get("is_dataset"):
+                r = doc.get("dataset_rows", "?")
+                c = doc.get("dataset_cols", "?")
+                relevance_item = QTableWidgetItem(f"DATASET {r}×{c}")
+                relevance_item.setForeground(QColor("#a371f7"))
+            else:
+                relevance_item = QTableWidgetItem(f"{doc['score']*100:.1f}%")
+            self.doc_table.setItem(row, 3, relevance_item)
 
     # ==========================================================
     # CHAT IA

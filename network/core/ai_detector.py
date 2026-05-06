@@ -1032,7 +1032,20 @@ class DocumentTrainer:
                 return " ".join(n.text or "" for n in tree.iter(f"{ns}t") if n.text)
             except: return ""
 
-        elif ext in (".md", ".rst", ".csv", ".log", ".ini", ".conf", ".yaml", ".yml", ".json"):
+        elif ext == ".csv":
+            # Intentar primero como dataset estructurado con pandas
+            dataset_text = self._extract_csv_dataset(filepath)
+            if dataset_text:
+                return dataset_text
+            # Fallback: leer como texto plano
+            for enc in ("utf-8", "latin-1", "cp1252"):
+                try:
+                    with open(filepath, "r", encoding=enc, errors="ignore") as f:
+                        return f.read()
+                except: pass
+            return ""
+
+        elif ext in (".md", ".rst", ".log", ".ini", ".conf", ".yaml", ".yml", ".json"):
             for enc in ("utf-8", "latin-1", "cp1252"):
                 try:
                     with open(filepath, "r", encoding=enc, errors="ignore") as f:
@@ -1041,6 +1054,91 @@ class DocumentTrainer:
             return ""
 
         return ""
+
+    def _extract_csv_dataset(self, filepath: str) -> str:
+        """
+        Extrae y convierte un dataset CSV en texto estructurado para entrenamiento.
+        Soporta cualquier tamaño, cualquier número de filas y columnas.
+        Genera texto enriquecido con: encabezados, estadísticas y contenido fila a fila.
+        """
+        try:
+            import pandas as pd
+        except ImportError:
+            return ""  # fallback al lector de texto plano
+
+        text_parts = []
+        try:
+            # Detectar encoding automáticamente
+            df = None
+            for enc in ("utf-8", "latin-1", "cp1252", "utf-16"):
+                try:
+                    df = pd.read_csv(filepath, encoding=enc, low_memory=False)
+                    break
+                except Exception:
+                    continue
+
+            if df is None or df.empty:
+                return ""
+
+            n_rows, n_cols = df.shape
+            col_names = list(df.columns)
+
+            # --- Encabezado del dataset ---
+            text_parts.append(
+                f"=== DATASET CSV: {Path(filepath).name} ===\n"
+                f"Filas: {n_rows} | Columnas: {n_cols}\n"
+                f"Columnas: {', '.join(str(c) for c in col_names)}\n"
+            )
+
+            # --- Estadísticas por columna ---
+            text_parts.append("--- ESTADÍSTICAS DEL DATASET ---")
+            for col in col_names:
+                col_data = df[col]
+                dtype = str(col_data.dtype)
+                n_null = int(col_data.isna().sum())
+                n_unique = col_data.nunique()
+                if pd.api.types.is_numeric_dtype(col_data):
+                    desc = col_data.describe()
+                    text_parts.append(
+                        f"Columna '{col}' [numérica]: "
+                        f"min={desc.get('min','?'):.4g}, max={desc.get('max','?'):.4g}, "
+                        f"media={desc.get('mean','?'):.4g}, std={desc.get('std','?'):.4g}, "
+                        f"nulos={n_null}, únicos={n_unique}"
+                    )
+                else:
+                    top_vals = col_data.dropna().value_counts().head(5).index.tolist()
+                    top_str = ", ".join(str(v) for v in top_vals)
+                    text_parts.append(
+                        f"Columna '{col}' [texto/categoría]: "
+                        f"únicos={n_unique}, nulos={n_null}, "
+                        f"valores frecuentes: [{top_str}]"
+                    )
+            text_parts.append("")
+
+            # --- Contenido fila a fila (todas las filas, en bloques legibles) ---
+            text_parts.append("--- CONTENIDO DEL DATASET (fila por fila) ---")
+            CHUNK = 5000   # filas por bloque para no generar strings gigantescos
+            for start in range(0, n_rows, CHUNK):
+                chunk = df.iloc[start:start + CHUNK]
+                rows_text = []
+                for idx, row in chunk.iterrows():
+                    parts = " | ".join(
+                        f"{col}: {'' if pd.isna(val) else val}"
+                        for col, val in zip(col_names, row)
+                    )
+                    rows_text.append(f"[fila {idx}] {parts}")
+                text_parts.append("\n".join(rows_text))
+
+            # --- Resumen final ---
+            text_parts.append(
+                f"\n=== FIN DATASET — {n_rows} filas x {n_cols} columnas procesadas ==="
+            )
+
+            return "\n".join(text_parts)
+
+        except Exception as e:
+            print(f"Error extrayendo dataset CSV: {e}")
+            return ""
 
     def validate_document(self, text: str) -> tuple:
         """Solo verifica que el documento tenga contenido legible. Sin restriccion de tema."""
@@ -1087,18 +1185,44 @@ class DocumentTrainer:
             return False, t("doc_duplicate")
 
         filename = Path(filepath).name
-        self.documents[doc_hash] = {
+        ext      = Path(filepath).suffix.lower()
+
+        # Guardar metadatos extra para datasets CSV
+        entry = {
             "filename": filename, "text": text,
             "score": round(score, 4), "date": datetime.now().isoformat(),
             "chars": len(text),
+            "is_dataset": ext == ".csv",
         }
+        if ext == ".csv":
+            # Extraer n_rows y n_cols del encabezado generado por _extract_csv_dataset
+            import re as _re
+            m = _re.search(r"Filas:\s*(\d+)\s*\|\s*Columnas:\s*(\d+)", text)
+            if m:
+                entry["dataset_rows"] = int(m.group(1))
+                entry["dataset_cols"] = int(m.group(2))
+
+        self.documents[doc_hash] = entry
         self._rebuild_index()
         self._save()
 
         lang = SYSTEM_LANG
-        msg = (f"'{filename}' agregado correctamente ({len(text):,} caracteres, {score*100:.1f}% relevancia red/seg)."
-               if lang=="es"
-               else f"'{filename}' added successfully ({len(text):,} chars, {score*100:.1f}% network/sec relevance).")
+        if ext == ".csv":
+            rows = entry.get("dataset_rows", "?")
+            cols = entry.get("dataset_cols", "?")
+            msg = (
+                f"Dataset '{filename}' entrenado: {rows} filas × {cols} columnas "
+                f"({len(text):,} caracteres indexados)."
+                if lang == "es" else
+                f"Dataset '{filename}' trained: {rows} rows × {cols} columns "
+                f"({len(text):,} characters indexed)."
+            )
+        else:
+            msg = (
+                f"'{filename}' agregado correctamente ({len(text):,} caracteres, {score*100:.1f}% relevancia red/seg)."
+                if lang == "es" else
+                f"'{filename}' added successfully ({len(text):,} chars, {score*100:.1f}% network/sec relevance)."
+            )
         return True, msg
 
     def _rebuild_index(self):
@@ -1172,9 +1296,20 @@ class DocumentTrainer:
         return fragment
 
     def list_documents(self) -> list:
-        return [{"filename": v["filename"], "date": v["date"][:10],
-                 "chars": v["chars"], "score": v["score"]}
-                for v in self.documents.values()]
+        result = []
+        for v in self.documents.values():
+            entry = {
+                "filename": v["filename"],
+                "date":     v["date"][:10],
+                "chars":    v["chars"],
+                "score":    v["score"],
+                "is_dataset": v.get("is_dataset", False),
+            }
+            if entry["is_dataset"]:
+                entry["dataset_rows"] = v.get("dataset_rows", "?")
+                entry["dataset_cols"] = v.get("dataset_cols", "?")
+            result.append(entry)
+        return result
 
     def remove_document(self, filename: str) -> bool:
         for h, v in list(self.documents.items()):
