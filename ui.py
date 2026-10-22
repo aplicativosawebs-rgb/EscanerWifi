@@ -16,7 +16,10 @@ from typing import Optional, Dict
 _PROJ_ROOT = os.path.abspath(os.path.dirname(__file__))        # ← EscanerWifi/
 _BACKEND   = os.path.join(_PROJ_ROOT, "backend")               # ← EscanerWifi/backend/
 _NETWORK   = os.path.join(_PROJ_ROOT, "network")               # ← EscanerWifi/network/
-_VISTAS    = os.path.join(_PROJ_ROOT, "vistas")                # ← EscanerWifi/vistas/
+_VISTAS    = os.path.join(_PROJ_ROOT, "vistas")
+                # ← EscanerWifi/vistas/
+                # ← EscanerWifi/img/wifi.svg
+
 for _p in (_PROJ_ROOT, _BACKEND, _NETWORK, _VISTAS):
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -99,7 +102,7 @@ except ImportError as _e:
 
 # ── 7. Vistas ─────────────────────────────────────────────────────────────
 from vistas.workers import ScanWorker, RouterCapacityWorker
-from vistas.card import Card
+from vistas.card import _ICONO_DIR, Card
 from vistas.network_details import NetworkDetailsDialog
 
 # ── Constantes visuales ───────────────────────────────────────────────────
@@ -198,7 +201,8 @@ class DevicesDialog(QDialog):
 
     def set_icon(self):
     # wifi.png está en img/, no en la raíz donde vive ui.py
-        icon_path = os.path.join(os.path.dirname(__file__), "img/wifi.png")
+        icon_path = os.path.join(_ICONO_DIR, "wifi.svg")
+
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 

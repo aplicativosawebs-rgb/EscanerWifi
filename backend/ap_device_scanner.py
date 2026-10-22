@@ -229,6 +229,146 @@ def _get_vendor_from_mac(mac: str) -> str:
     return "Fabricante Desconocido"
 
 # ----------------------------------------------------------------------
+# ESCANEO PARA WINDOWS - ✓ CORREGIDO
+# ======================================================================
+# CAMBIO: Primero obtiene tabla ARP COMPLETA, luego hace ping
+# Esto detecta TODOS los dispositivos, incluso los que no responden ping
+# ======================================================================
+def _scan_windows_optimized(red_info: Dict = None) -> List[Dict]:
+    devices = []
+    seen_macs = set()
+
+    try:
+        local_ip = _get_local_ip_address()
+        if not local_ip or not _is_valid_ip(local_ip):
+            return _fallback_arp_scan_windows()
+
+        gateway = _get_default_gateway() or "192.168.1.1"
+        subnet = '.'.join(local_ip.split('.')[:3]) + '.'
+
+        print(f"[WINDOWS] Obteniendo tabla ARP...")
+        
+        # ✓ PRIMERO: Obtener tabla ARP COMPLETA (todos los dispositivos conocidos)
+        try:
+            result = subprocess.run(
+                ['arp', '-a'], capture_output=True, text=True,
+                encoding='cp850', errors='replace', timeout=10
+            )
+            
+            if result.returncode == 0:
+                print(f"[WINDOWS] Analizando tabla ARP...")
+                for line in result.stdout.splitlines():
+                    # Línea típica: "192.168.1.5          38-c0-ea-ac-f4-c0"
+                    parts = re.split(r'\s+', line.strip())
+                    if len(parts) >= 2:
+                        ip = parts[0]
+                        mac = parts[1].replace('-', ':').upper()
+                        
+                        # Validar IP y MAC
+                        if _is_valid_ip(ip) and _is_valid_mac(mac) and mac not in seen_macs:
+                            # ✓ IMPORTANTE: Aceptar incluso si no responden ping
+                            # (móviles en sleep/ahorro no contestan pero están en ARP)
+                            seen_macs.add(mac)
+                            devices.append(_create_device_info(ip, mac))
+                            print(f"  ✓ {ip} -> {mac}")
+        except Exception as e:
+            print(f"[WINDOWS] Error leyendo ARP: {e}")
+        
+        print(f"[WINDOWS] Tabla ARP: {len(devices)} dispositivos")
+        
+        # ✓ SEGUNDO: Hacer ping a IPs de la subred para encontrar nuevos dispositivos
+        print(f"[WINDOWS] Escaneando subred {subnet}0/24 para nuevos dispositivos...")
+        
+        active_ips = []
+        threads = []
+        
+        def ping_ip(ip):
+            if _ping_ip_fast(ip):
+                active_ips.append(ip)
+        
+        # Solo escanear IPs que NO están ya en la tabla ARP
+        existing_ips = {d['ip'] for d in devices}
+        
+        for i in range(1, 255):
+            ip = f"{subnet}{i}"
+            if ip not in existing_ips:
+                t = threading.Thread(target=ping_ip, args=(ip,), daemon=True)
+                threads.append(t)
+                t.start()
+        
+        # Esperar resultados con timeout
+        for t in threads:
+            t.join(timeout=2)
+        
+        # Agregar nuevos dispositivos encontrados por ping
+        for ip in active_ips:
+            if all(d['ip'] != ip for d in devices):
+                mac = _get_mac_from_arp_fast(ip)
+                if mac and _is_valid_mac(mac) and mac not in seen_macs:
+                    seen_macs.add(mac)
+                    devices.append(_create_device_info(ip, mac))
+                    print(f"  ✓ Nuevo: {ip} -> {mac}")
+        
+        # ✓ Agregar dispositivo local si no está
+        if all(d['ip'] != local_ip for d in devices):
+            local_mac = _get_mac_from_arp_fast(local_ip)
+            
+            if not local_mac:
+                try:
+                    res = subprocess.run(
+                        ["getmac"], capture_output=True, text=True, encoding="cp850", errors="ignore"
+                    )
+                    m = re.search(r'([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})', res.stdout)
+                    if m:
+                        local_mac = m.group(0).replace('-', ':').upper()
+                except:
+                    pass
+            
+            if not local_mac:
+                import uuid
+                local_mac = ':'.join(re.findall('..', f"{uuid.getnode():012x}".upper()))
+            
+            if _is_valid_mac(local_mac):
+                devices.append(_create_device_info(local_ip, local_mac))
+                print(f"  ✓ Local: {local_ip} -> {local_mac}")
+        
+        # ✓ Agregar gateway si no está
+        if gateway not in [d['ip'] for d in devices]:
+            router_mac = _get_mac_from_arp_fast(gateway)
+            if router_mac and _is_valid_mac(router_mac):
+                devices.append(_create_device_info(gateway, router_mac))
+                print(f"  ✓ Gateway: {gateway} -> {router_mac}")
+        
+        print(f"[WINDOWS] Total encontrados: {len(devices)} dispositivos")
+        
+    except Exception as e:
+        print(f"[Windows] Error en escaneo: {e}")
+        return _fallback_arp_scan_windows()
+    
+    return devices
+
+def _fallback_arp_scan_windows() -> List[Dict]:
+    devices = []
+    seen_macs = set()
+    try:
+        result = subprocess.run(
+            ['arp', '-a'], capture_output=True, text=True,
+            encoding='cp850', errors='replace', timeout=10
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                parts = re.split(r'\s+', line.strip())
+                if len(parts) >= 3:
+                    ip, mac = parts[0], parts[1].replace('-', ':').upper()
+                    
+                    if _is_valid_ip(ip) and _is_valid_mac(mac) and mac not in seen_macs:
+                        seen_macs.add(mac)
+                        devices.append(_create_device_info(ip, mac))
+    except:
+        pass
+    return devices
+
+# ----------------------------------------------------------------------
 # ESCANEO PARA LINUX - Versión mejorada
 # ----------------------------------------------------------------------
 def _scan_linux_optimized(red_info: Dict = None) -> List[Dict]:
@@ -440,99 +580,6 @@ def _fallback_arp_scan_linux() -> List[Dict]:
     return _get_arp_table_linux()
 
 # ----------------------------------------------------------------------
-# ESCANEO PARA WINDOWS (sin cambios)
-# ----------------------------------------------------------------------
-def _scan_windows_optimized(red_info: Dict = None) -> List[Dict]:
-    devices = []
-    seen_macs = set()
-
-    try:
-        local_ip = _get_local_ip_address()
-        if not local_ip or not _is_valid_ip(local_ip):
-            return _fallback_arp_scan_windows()
-
-        gateway = _get_default_gateway() or "192.168.1.1"
-        subnet = '.'.join(local_ip.split('.')[:3]) + '.'
-
-        print(f"[ESCANEO] Escaneando red {subnet}0/24...")
-        active_ips = []
-        threads = []
-
-        def ping_ip(ip):
-            if _ping_ip_fast(ip):
-                active_ips.append(ip)
-
-        for i in range(1, 255):
-            ip = f"{subnet}{i}"
-            t = threading.Thread(target=ping_ip, args=(ip,), daemon=True)
-            threads.append(t)
-            t.start()
-
-        for t in threads:
-            t.join(timeout=3)
-
-        for ip in active_ips:
-            mac = _get_mac_from_arp_fast(ip)
-            if mac and _is_valid_mac(mac) and mac not in seen_macs:
-                seen_macs.add(mac)
-                devices.append(_create_device_info(ip, mac))
-
-        if all(d['ip'] != local_ip for d in devices):
-            local_mac = _get_mac_from_arp_fast(local_ip)
-
-            if not local_mac:
-                try:
-                    res = subprocess.run(
-                        ["getmac"], capture_output=True, text=True, encoding="cp850", errors="ignore"
-                    )
-                    m = re.search(r'([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})', res.stdout)
-                    if m:
-                        local_mac = m.group(0).replace('-', ':').upper()
-                except:
-                    pass
-
-            if not local_mac:
-                import uuid
-                local_mac = ':'.join(re.findall('..', f"{uuid.getnode():012x}".upper()))
-
-            if _is_valid_mac(local_mac):
-                devices.append(_create_device_info(local_ip, local_mac))
-
-        if gateway not in [d['ip'] for d in devices]:
-            router_mac = _get_mac_from_arp_fast(gateway)
-            if router_mac and _is_valid_mac(router_mac):
-                devices.append(_create_device_info(gateway, router_mac))
-
-        print(f"[ESCANEO] Encontrados {len(devices)} dispositivos activos.")
-
-    except Exception as e:
-        print(f"[Windows] Error en escaneo activo: {e}")
-        return _fallback_arp_scan_windows()
-
-    return devices
-
-def _fallback_arp_scan_windows() -> List[Dict]:
-    devices = []
-    seen_macs = set()
-    try:
-        result = subprocess.run(
-            ['arp', '-a'], capture_output=True, text=True,
-            encoding='cp850', errors='replace', timeout=10
-        )
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                parts = re.split(r'\s+', line.strip())
-                if len(parts) >= 3:
-                    ip, mac = parts[0], parts[1].replace('-', ':').upper()
-                    
-                    if _is_valid_ip(ip) and _is_valid_mac(mac) and mac not in seen_macs:
-                        seen_macs.add(mac)
-                        devices.append(_create_device_info(ip, mac))
-    except:
-        pass
-    return devices
-
-# ----------------------------------------------------------------------
 # ESCANEO PARA macOS
 # ----------------------------------------------------------------------
 def _scan_macos_optimized(red_info: Dict = None) -> List[Dict]:
@@ -644,8 +691,10 @@ def _parse_arp_table(arp_output: str, red_info: Dict = None) -> List[Dict]:
     return devices
 
 # ----------------------------------------------------------------------
-# Filtro de dispositivos activos
-# ----------------------------------------------------------------------
+# Filtro de dispositivos activos - ✓ MEJORADO
+# ======================================================================
+# CAMBIO: Menos restrictivo - acepta más dispositivos
+# ======================================================================
 def _is_device_reachable(device: Dict) -> bool:
     ip = device.get('ip')
     if not ip or ip == 'N/A':
@@ -654,8 +703,9 @@ def _is_device_reachable(device: Dict) -> bool:
 
 def _filter_active_devices(devices: List[Dict], red_info: Dict = None) -> List[Dict]:
     """
-    Filtra y valida los dispositivos activos detectados.
-    Acepta también los que no responden ping pero tienen MAC válida.
+    ✓ MEJORADO: Filtra menos agresivamente
+    Acepta cualquier dispositivo que tenga IP y MAC válida
+    (incluso si no responde ping, está en ARP table)
     """
     active = []
     seen = set()
@@ -663,26 +713,23 @@ def _filter_active_devices(devices: List[Dict], red_info: Dict = None) -> List[D
 
     for dev in devices:
         ip, mac = dev.get('ip'), dev.get('mac')
+        
+        # Validación básica
         if not _is_valid_ip(ip) or not _is_valid_mac(mac):
             continue
+        
+        # No duplicados
         if mac in seen:
             continue
+        
         seen.add(mac)
-
-        if red_info and red_info.get('router_ip') == ip:
-            active.append(dev)
-            continue
-
-        if mac in device_cache and (now - device_cache[mac]) < timedelta(seconds=CACHE_DURATION):
-            active.append(dev)
-            continue
-
-        reachable = _ping_ip_fast(ip)
-        if not reachable:
-            reachable = _check_device_ports(ip)
-
-        if reachable or mac:
-            active.append(dev)
+        
+        # ✓ IMPORTANTE: Aceptar si está en caché o en ARP
+        # No rechazar solo porque no responde ping
+        is_in_cache = mac in device_cache and (now - device_cache[mac]) < timedelta(seconds=CACHE_DURATION)
+        
+        # Aceptar el dispositivo
+        active.append(dev)
 
     return active
 

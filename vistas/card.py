@@ -13,7 +13,9 @@ _VISTAS_DIR = os.path.abspath(os.path.dirname(__file__))
 _PROJ_ROOT  = os.path.dirname(_VISTAS_DIR)
 _BACKEND    = os.path.join(_PROJ_ROOT, "backend")
 _NETWORK    = os.path.join(_PROJ_ROOT, "network")
-for _p in (_PROJ_ROOT, _BACKEND, _NETWORK):
+_ICONO_DIR  = os.path.join(_PROJ_ROOT, "img", "wifi.png")
+
+for _p in (_PROJ_ROOT, _BACKEND, _NETWORK, _ICONO_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 

@@ -339,7 +339,7 @@ def parse_netsh_output_corrected(output):
         # Procesar información de señal y canal para la BSSID actual
         if current_bssid and current_ssid:
             # Señal
-            if 'seal' in line.lower() or 'signal' in line.lower():
+            if 'señal' in line.lower() or 'signal' in line.lower():
                 sig_match = re.search(r'(\d+)%', line)
                 if sig_match:
                     current_data['signal'] = int(sig_match.group(1))
@@ -572,14 +572,16 @@ def clean_bssid(bssid):
 
 
 def percentage_to_dbm(percentage):
-    """Convierte porcentaje de señal a dBm (aproximado)"""
-    if percentage >= 100:
-        return -20
-    elif percentage <= 0:
+    """Convierte porcentaje de señal a dBm CORRECTAMENTE"""
+    if percentage is None or percentage < 0:
         return -100
-    else:
-        # Curva no lineal más realista
-        return round(-20 - (80 * ((100 - percentage) / 100) ** 1.5), 1)
+    
+    if percentage >= 100:
+        return -30  # ✓ CORREGIDO: era -20, ahora -30 (rango real de RSSI)
+    
+    # Fórmula CORRECTA: mapea 0-100% al rango -100 a -30 dBm
+    dbm = -30 - (70 * (100 - percentage) / 100)
+    return round(dbm, 1)
 
 
 def channel_to_freq(channel):
@@ -818,8 +820,25 @@ def scan_wifi_realistic(wait_time=1.2, environment="auto"):
 
 
 def scan_wifi(tx_power_dbm_default=20.0, path_loss_exp_default=3.2, wait_time=1.2):
-    return scan_wifi_netsh(environment="auto")
-
+    # ✓ CORRECCIÓN: Forzar escaneo ACTIVO para detectar nuevas redes
+    print("🔍 Iniciando escaneo activo de WiFi...")
+    try:
+        result = subprocess.run(
+            ['netsh', 'wlan', 'refresh', 'type=all'],
+            capture_output=True,
+            timeout=5,
+            text=True
+        )
+        if result.returncode == 0:
+            print("✓ Escaneo activo completado")
+        else:
+            print(f"⚠️  Escaneo activo: {result.stderr}")
+    except Exception as e:
+        print(f"❌ Error escaneo activo: {e}")
+    
+    redes = scan_wifi_netsh(environment="auto")
+    print(f"📡 Redes encontradas: {len(redes)}")
+    return redes
 
 # ---------- Función principal ----------
 '''if __name__ == "__main__":
